@@ -1,4 +1,5 @@
-﻿using Microsoft.CodeAnalysis;
+﻿using System.Diagnostics;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Text;
@@ -45,18 +46,73 @@ public partial class MemoryPackGenerator : IIncrementalGenerator
 
     void RegisterMemoryPackable(IncrementalGeneratorInitializationContext context)
     {
-        // return dir of info output or null .
-        var logProvider = context.AnalyzerConfigOptionsProvider
-            .Select((configOptions, token) =>
-            {
-                if (configOptions.GlobalOptions.TryGetValue("build_property.MemoryPackGenerator_SerializationInfoOutputDirectory", out var path))
+        var logProvider = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                static (node, _) =>
                 {
-                    return path;
-                }
+                    if (node is TypeDeclarationSyntax typeDecl)
+                    {
+                        return typeDecl.AttributeLists.Any(attr => attr.ToString().Contains("MemoryPackable"));
+                    }
+                    return false;
+                },
+                static (context, _) => context.Node
+            )
+            .Collect()
+            .Select((matchedNodes, cancellationToken) =>
+            {
+                if (matchedNodes.Any())
+                {
+                    var firstFilePath = matchedNodes.First().SyntaxTree.FilePath;
 
-                return (string?)null;
+                    int index = firstFilePath.IndexOf("Assets", StringComparison.OrdinalIgnoreCase);
+                    string assetDir;
+                    if (index >= 0)
+                    {
+                        assetDir = firstFilePath.Substring(0, index) + "Assets";
+                    }
+                    else
+                    {
+                        // we should never hit this else
+                        assetDir = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                    }
+
+                    var projectRoot = Directory.GetParent(assetDir)?.FullName;
+
+                    if (projectRoot != null)
+                    {
+                        var outputDir = Path.Combine(projectRoot, "MemoryPackSerializationInfo");
+
+                        Directory.CreateDirectory(outputDir);
+
+                        // Enabling this code segment will create log on desktop for debugging purposes
+                        //----------------------------------------------------------------------------------------------
+                        /*
+                        var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                        var logFilePath = Path.Combine(desktopPath, "MemoryPackGeneratorDebug.log");
+                        var logText =
+                            $"[MemoryPack.Generator] ProjectRoot: {projectRoot}{Environment.NewLine}" +
+                            $"[MemoryPack.Generator] OutputDir: {outputDir}{Environment.NewLine}" +
+                            $"[MemoryPack.Generator] Matched nodes number: {matchedNodes.Length}{Environment.NewLine}" +
+                            $"[MemoryPack.Generator] Timestamp: {DateTime.Now}{Environment.NewLine}" +
+                            new string('-', 40) + Environment.NewLine;
+                        try
+                        {
+                            File.AppendAllText(logFilePath, logText);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[MemoryPack] Error writing log: {ex.Message}");
+                        }
+                        */
+                        //----------------------------------------------------------------------------------------------
+
+                        return outputDir;
+                    }
+                }
+                return null;
             })
-            .WithTrackingName("MemoryPack.MemoryPackable.0_AnalyzerConfigOptionsProvider"); // annotate for IncrementalGeneratorTest
+            .WithTrackingName("MemoryPack.MemoryPackable.0_AnalyzerConfigOptionsProvider");
 
         var parseOptions = context.ParseOptionsProvider
             .Select((parseOptions, token) =>
