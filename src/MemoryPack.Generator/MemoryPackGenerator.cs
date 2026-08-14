@@ -46,74 +46,6 @@ public partial class MemoryPackGenerator : IIncrementalGenerator
 
     void RegisterMemoryPackable(IncrementalGeneratorInitializationContext context)
     {
-        var logProvider = context.SyntaxProvider
-            .CreateSyntaxProvider(
-                static (node, _) =>
-                {
-                    if (node is TypeDeclarationSyntax typeDecl)
-                    {
-                        return typeDecl.AttributeLists.Any(attr => attr.ToString().Contains("MemoryPackable"));
-                    }
-                    return false;
-                },
-                static (context, _) => context.Node
-            )
-            .Collect()
-            .Select((matchedNodes, cancellationToken) =>
-            {
-                if (matchedNodes.Any())
-                {
-                    var firstFilePath = matchedNodes.First().SyntaxTree.FilePath;
-
-                    int index = firstFilePath.IndexOf("Assets", StringComparison.OrdinalIgnoreCase);
-                    string assetDir;
-                    if (index >= 0)
-                    {
-                        assetDir = firstFilePath.Substring(0, index) + "Assets";
-                    }
-                    else
-                    {
-                        // we should never hit this else
-                        assetDir = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                    }
-
-                    var projectRoot = Directory.GetParent(assetDir)?.FullName;
-
-                    if (projectRoot != null)
-                    {
-                        var outputDir = Path.Combine(projectRoot, "MemoryPackSerializationInfo");
-
-                        Directory.CreateDirectory(outputDir);
-
-                        // Enabling this code segment will create log on desktop for debugging purposes
-                        //----------------------------------------------------------------------------------------------
-                        /*
-                        var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                        var logFilePath = Path.Combine(desktopPath, "MemoryPackGeneratorDebug.log");
-                        var logText =
-                            $"[MemoryPack.Generator] ProjectRoot: {projectRoot}{Environment.NewLine}" +
-                            $"[MemoryPack.Generator] OutputDir: {outputDir}{Environment.NewLine}" +
-                            $"[MemoryPack.Generator] Matched nodes number: {matchedNodes.Length}{Environment.NewLine}" +
-                            $"[MemoryPack.Generator] Timestamp: {DateTime.Now}{Environment.NewLine}" +
-                            new string('-', 40) + Environment.NewLine;
-                        try
-                        {
-                            File.AppendAllText(logFilePath, logText);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[MemoryPack] Error writing log: {ex.Message}");
-                        }
-                        */
-                        //----------------------------------------------------------------------------------------------
-
-                        return outputDir;
-                    }
-                }
-                return null;
-            })
-            .WithTrackingName("MemoryPack.MemoryPackable.0_AnalyzerConfigOptionsProvider");
-
         var parseOptions = context.ParseOptionsProvider
             .Select((parseOptions, token) =>
             {
@@ -156,34 +88,30 @@ public partial class MemoryPackGenerator : IIncrementalGenerator
             var source = typeDeclarations
                 .Combine(context.CompilationProvider)
                 .WithComparer(Comparer.Instance)
-                .Combine(logProvider)
                 .Combine(parseOptions)
                 .WithTrackingName("MemoryPack.MemoryPackable.2_MemoryPackableCombined");
 
             context.RegisterSourceOutput(source, static (context, source) =>
             {
-                var (typeDeclaration, compilation) = source.Left.Item1;
-                var logPath = source.Left.Item2;
+                var (typeDeclaration, compilation) = source.Left;
                 var (langVersion, net7) = source.Right;
 
-                Generate(typeDeclaration, compilation, logPath, new GeneratorContext(context, langVersion, net7));
+                Generate(typeDeclaration, compilation, new GeneratorContext(context, langVersion, net7));
             });
         }
         {
             var source = typeDeclarations2
                 .Combine(context.CompilationProvider)
                 .WithComparer(Comparer.Instance)
-                .Combine(logProvider)
                 .Combine(parseOptions)
                 .WithTrackingName("MemoryPack.MemoryPackable.2_MemoryPackUnionCombined");
 
             context.RegisterSourceOutput(source, static (context, source) =>
             {
-                var (typeDeclaration, compilation) = source.Left.Item1;
-                var logPath = source.Left.Item2;
+                var (typeDeclaration, compilation) = source.Left;
                 var (langVersion, net7) = source.Right;
 
-                Generate(typeDeclaration, compilation, logPath, new GeneratorContext(context, langVersion, net7));
+                Generate(typeDeclaration, compilation, new GeneratorContext(context, langVersion, net7));
             });
         }
     }

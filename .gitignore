@@ -2,6 +2,10 @@
 [Bb]in/
 [Oo]bj/
 
+# Serialization info the generator writes for this repository's own sandbox/benchmark/test types.
+# Consuming repositories track their own copy of this folder; here it is just build output.
+MemoryPackSerializationInfo~/
+
 # mstest test results
 TestResults
 

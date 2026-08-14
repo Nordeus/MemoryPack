@@ -1,6 +1,7 @@
 ﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 
@@ -8,7 +9,12 @@ namespace MemoryPack.Generator;
 
 partial class MemoryPackGenerator
 {
-    static void Generate(TypeDeclarationSyntax syntax, Compilation compilation, string? serializationInfoLogDirectoryPath, IGeneratorContext context)
+    const string SerializationInfoDirectoryName = "MemoryPackSerializationInfo~";
+
+    // Generate runs for every type on every compilation, so cache the walk per source directory.
+    static readonly ConcurrentDictionary<string, string?> serializationInfoDirectoryCache = new();
+
+    static void Generate(TypeDeclarationSyntax syntax, Compilation compilation, IGeneratorContext context)
     {
         var semanticModel = compilation.GetSemanticModel(syntax.SyntaxTree);
 
@@ -111,19 +117,16 @@ using MemoryPack;
             BuildDebugInfo(sb, typeMeta, true);
 
             // also output to log
-            if (serializationInfoLogDirectoryPath != null)
+            var serializationInfoDirectory = ResolveSerializationInfoDirectory(syntax.SyntaxTree.FilePath);
+            if (serializationInfoDirectory != null)
             {
                 try
                 {
-                    if (!Directory.Exists(serializationInfoLogDirectoryPath))
-                    {
-                        Directory.CreateDirectory(serializationInfoLogDirectoryPath);
-                    }
                     var logSw = new StringBuilder();
                     BuildDebugInfo(logSw, typeMeta, false);
                     var message = logSw.ToString();
 
-                    File.WriteAllText(Path.Combine(serializationInfoLogDirectoryPath, $"{fullType}.txt"), message, new UTF8Encoding(false));
+                    File.WriteAllText(Path.Combine(serializationInfoDirectory, $"{fullType}.txt"), message, new UTF8Encoding(false));
                 }
                 catch (Exception ex)
                 {
@@ -149,6 +152,76 @@ using MemoryPack;
 
         var code = sb.ToString();
         context.AddSource($"{fullType}.MemoryPackFormatter.g.cs", code);
+    }
+
+    // Serialization info is written to the root of the git repository that owns the source file, so that a
+    // change to a serialized layout shows up in the diff of that repository's pull request - types declared
+    // in a submodule get their own folder inside it. The '~' suffix keeps Unity's asset pipeline out of the
+    // folder: no TextAsset import, no .meta files, and no import triggered by writing during compilation.
+    // Returns null when the file does not live in a git repository, in which case nothing is written.
+    static string? ResolveSerializationInfoDirectory(string sourceFilePath)
+    {
+        if (string.IsNullOrEmpty(sourceFilePath))
+        {
+            return null;
+        }
+
+        string? sourceDirectory;
+        try
+        {
+            sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(sourceFilePath));
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine(ex.ToString());
+            return null;
+        }
+
+        if (string.IsNullOrEmpty(sourceDirectory))
+        {
+            return null;
+        }
+
+        var outputDirectory = serializationInfoDirectoryCache.GetOrAdd(sourceDirectory!, static directory =>
+        {
+            try
+            {
+                // The nearest ancestor holding a .git entry wins, so a submodule beats the repository containing
+                // it. .git is a directory in a normal clone and a file in a submodule or a worktree.
+                for (var current = new DirectoryInfo(directory); current != null; current = current.Parent)
+                {
+                    var gitPath = Path.Combine(current.FullName, ".git");
+                    if (Directory.Exists(gitPath) || File.Exists(gitPath))
+                    {
+                        return Path.Combine(current.FullName, SerializationInfoDirectoryName);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine(ex.ToString());
+            }
+
+            return null;
+        });
+
+        if (outputDirectory == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            // not cached - the folder may be deleted between compilations, and creating an existing one is a no-op
+            Directory.CreateDirectory(outputDirectory);
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine(ex.ToString());
+            return null;
+        }
+
+        return outputDirectory;
     }
 
     static bool IsPartial(TypeDeclarationSyntax typeDeclaration)
