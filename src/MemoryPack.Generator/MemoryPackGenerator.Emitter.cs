@@ -274,8 +274,10 @@ using MemoryPack;
             {
                 sb.Append("GenerateType " + type.GenerateType.ToString() + " ");
             }
-            sb.AppendLine(WithEscape(type.Symbol));
-            sb.AppendLine("---");
+            // Always use '\n' (not AppendLine/Environment.NewLine) so these committed
+            // .txt files have stable line endings regardless of the build OS.
+            sb.Append(WithEscape(type.Symbol)).Append('\n');
+            sb.Append("---").Append('\n');
         }
         else
         {
@@ -313,7 +315,7 @@ using MemoryPack;
             }
             else
             {
-                sb.AppendLine();
+                sb.Append('\n');
             }
         }
         if (xmlDocument)
