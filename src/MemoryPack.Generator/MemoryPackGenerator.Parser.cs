@@ -66,6 +66,43 @@ public partial class TypeMeta
     public (ushort Tag, INamedTypeSymbol Type)[] UnionTags { get; }
     public bool IsUseEmptyConstructor => Constructor == null || Constructor.Parameters.IsEmpty;
 
+    /// <summary>
+    /// Whether `new T()` can be emitted to obtain an instance carrying the declared field/property
+    /// initializers. The generated code lives inside `partial T`, so even a private parameterless
+    /// constructor is reachable; only the complete absence of one (e.g. the type declares only a
+    /// parameterized constructor) makes this impossible.
+    /// </summary>
+    public bool CanConstructDefaultValues => !IsInterfaceOrAbstract
+        && (IsValueType || Symbol.InstanceConstructors.Any(x => x.Parameters.IsEmpty));
+
+    /// <summary>
+    /// `required` members that `new T()` must assign in an object initializer to compile. They get
+    /// `default` there — `required` means the caller always supplies the value, so the type has no
+    /// meaningful declared default for them.
+    /// </summary>
+    public string[] RequiredMemberNames
+    {
+        get
+        {
+#if ROSLYN3
+            return Array.Empty<string>();
+#else
+            var emptyConstructor = Symbol.InstanceConstructors.FirstOrDefault(x => x.Parameters.IsEmpty);
+            if (emptyConstructor != null && emptyConstructor.GetAttributes().Any(x => x.AttributeClass?.Name == "SetsRequiredMembersAttribute"))
+            {
+                return Array.Empty<string>();
+            }
+
+            // [MemoryPackIgnore]d members count too, they still have to be set to satisfy the compiler
+            return Symbol.GetAllMembers()
+                .Where(x => x is IPropertySymbol { IsRequired: true } or IFieldSymbol { IsRequired: true })
+                .Select(x => x.Name)
+                .Distinct()
+                .ToArray();
+#endif
+        }
+    }
+
     public TypeMeta(INamedTypeSymbol symbol, ReferenceSymbols reference)
     {
         this.reference = reference;

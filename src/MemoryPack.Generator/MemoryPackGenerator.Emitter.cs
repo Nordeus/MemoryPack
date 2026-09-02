@@ -590,6 +590,30 @@ partial {{classOrStructOrRecord}} {{TypeName}}
 """;
         }
 
+        // `value == null` means there is no instance to take the declared initializers from, so
+        // members the payload does not carry are seeded from a throwaway `new T()` instead of
+        // `default`. Only reachable when the payload can omit members, i.e. `deltas[i] == 0`
+        // (VersionTolerant only) or `count < Members.Length` (both layouts).
+
+        // Blank members are padded order slots, they have nothing to restore and never reference it
+        var hasRestorableMembers = Members.Any(x => x.Symbol != null);
+
+        var equalCountAccessor = isVersionTolerant ? DefaultValuesAccessor(eager: false) : null;
+        var equalCountBody = EmitDeserializeMembers(Members, "                ", equalCountAccessor);
+        if (equalCountAccessor != null && hasRestorableMembers)
+        {
+            equalCountBody = EmitDefaultValuesDeclaration("                ", eager: false) + Environment.NewLine + equalCountBody;
+        }
+
+        var lessCountAccessor = DefaultValuesAccessor(eager: true);
+        var lessCountBody = Members.Where(x => x.Symbol != null)
+            .Select(x => $"               __{x.Name} = {(lessCountAccessor != null ? $"{lessCountAccessor}.@{x.Name}" : "default!")};")
+            .NewLine();
+        if (lessCountAccessor != null && hasRestorableMembers)
+        {
+            lessCountBody = EmitDefaultValuesDeclaration("               ", eager: true) + Environment.NewLine + lessCountBody;
+        }
+
         return $$"""
         if (!reader.TryReadObjectHeader(out var count))
         {
@@ -606,7 +630,7 @@ partial {{classOrStructOrRecord}} {{TypeName}}
         {
             {{(IsValueType ? "" : "if (value == null)")}}
             {
-{{EmitDeserializeMembers(Members, "                ")}}
+{{equalCountBody}}
 
                 goto NEW;
             }
@@ -629,7 +653,7 @@ partial {{classOrStructOrRecord}} {{TypeName}}
         {
             {{(IsValueType ? "" : "if (value == null)")}}
             {
-{{Members.Where(x => x.Symbol != null).Select(x => $"               __{x.Name} = default!;").NewLine()}}
+{{lessCountBody}}
             }
 {{(IsValueType ? "#if false" : "            else")}}
             {
@@ -947,7 +971,7 @@ partial {{classOrStructOrRecord}} {{TypeName}}
     }
 
     // for optimize, can use same count, value == null.
-    public string EmitDeserializeMembers(MemberMeta[] members, string indent)
+    public string EmitDeserializeMembers(MemberMeta[] members, string indent, string? defaultValuesAccessor = null)
     {
         // {{Members.Select(x => "                " + x.EmitReadToDeserialize()).NewLine()}}
         var sb = new StringBuilder();
@@ -956,7 +980,7 @@ partial {{classOrStructOrRecord}} {{TypeName}}
             if (!(members[i].Kind is MemberKind.Unmanaged or MemberKind.Enum or MemberKind.UnmanagedNullable) || (GenerateType is GenerateType.VersionTolerant or GenerateType.CircularReference))
             {
                 sb.Append(indent);
-                sb.AppendLine(members[i].EmitReadToDeserialize(i, GenerateType is GenerateType.VersionTolerant or GenerateType.CircularReference));
+                sb.AppendLine(members[i].EmitReadToDeserialize(i, GenerateType is GenerateType.VersionTolerant or GenerateType.CircularReference, defaultValuesAccessor));
                 continue;
             }
 
@@ -1001,6 +1025,39 @@ partial {{classOrStructOrRecord}} {{TypeName}}
         }
 
         return sb.ToString();
+    }
+
+    const string DefaultValuesVariable = "__defaultValues";
+
+    // Declares a `T` holding the declared field/property initializers, used to seed the `__Name`
+    // locals of members that the payload does not carry. `eager` is for blocks that seed every
+    // member anyway; the lazy form keeps `count == Members.Length` (the hot path) allocation-free
+    // unless some member is actually missing.
+    string EmitDefaultValuesDeclaration(string indent, bool eager)
+    {
+        if (!CanConstructDefaultValues) return "";
+
+        // a value type is stack-only here, so there is nothing to gain from the (nullable) lazy form
+        return (eager || IsValueType)
+            ? $"{indent}var {DefaultValuesVariable} = {EmitDefaultValuesConstructor()};"
+            : $"{indent}{TypeName}? {DefaultValuesVariable} = null;";
+    }
+
+    string? DefaultValuesAccessor(bool eager)
+    {
+        if (!CanConstructDefaultValues) return null;
+
+        return (eager || IsValueType)
+            ? DefaultValuesVariable
+            : $"({DefaultValuesVariable} ??= {EmitDefaultValuesConstructor()})";
+    }
+
+    string EmitDefaultValuesConstructor()
+    {
+        var requiredMembers = RequiredMemberNames;
+        return (requiredMembers.Length == 0)
+            ? $"new {TypeName}()"
+            : $"new {TypeName}() {{ {string.Join(", ", requiredMembers.Select(x => $"@{x} = default!"))} }}";
     }
 
     string EmitConstructor()
@@ -1419,11 +1476,15 @@ public partial class MemberMeta
         }
     }
 
-    public string EmitReadToDeserialize(int i, bool requireDeltaCheck)
+    public string EmitReadToDeserialize(int i, bool requireDeltaCheck, string? defaultValuesAccessor = null)
     {
+        // when the payload has no bytes for this member, keep the declared initializer instead of
+        // overwriting it with `default` (Blank is a padded order slot, it has no member to restore)
         var equalDefault = Kind == MemberKind.Blank
             ? "{ }"
-            : $"{{ __{Name} = default; }}";
+            : (defaultValuesAccessor != null)
+                ? $"{{ __{Name} = {defaultValuesAccessor}.@{Name}; }}"
+                : $"{{ __{Name} = default; }}";
 
         var pre = requireDeltaCheck
             ? $"if (deltas[{i}] == 0) {equalDefault} else "

@@ -547,8 +547,7 @@ public partial class VersionCheck
 In use-case, store old data (to file, to redis, etc...) and read to new schema is always ok. In the RPC scenario, schema exists both on the client and the server side, the client must be updated before the server. An updated client has no problem connecting to the old server but an old client can not connect to a new server.
 
 
-By default, when the old data read to new schema, any members not on the data side are initialized with the `default` literal.
-If you want to avoid this and use initial values of field/properties, you can use `[SuppressDefaultInitialization]`.
+When the old data read to new schema, any members not on the data side keep the initial values of their field/property.
 
 ```cs
 [MemoryPackable]
@@ -556,14 +555,24 @@ public partial class DefaultValue
 {
     public string Prop1 { get; set; }
 
-    [SuppressDefaultInitialization]
     public int Prop2 { get; set; } = 111; // < if old data is missing, set `111`.
-    
-    public int Prop3 { get; set; } = 222; // < if old data is missing, set `default`.
+
+    public int Prop3 { get; init; } = 222; // < if old data is missing, set `222`.
+
+    public int Prop4 { get; set; }         // < no initial value, so set `default`.
 }
 ```
 
- `[SuppressDefaultInitialization]` has following limitation:
+Values assigned by a parameterless constructor are restored the same way, because the initial values
+are read from a throwaway `new T()` instance. This has the following limitations:
+
+- The type must have a parameterless constructor. When the only constructor is a parameterized
+  `[MemoryPackConstructor]`, missing members fall back to the `default` literal.
+- `required` members always fall back to the `default` literal, because `required` means the caller
+  always supplies the value.
+
+`[SuppressDefaultInitialization]` is no longer needed and is kept only for source compatibility.
+It still has following limitation:
 - Cannot be used with readonly, init-only, and required modifier.
 
 The next [Serialization info](#serialization-info) section shows how to check for schema changes, e.g., by CI, to prevent accidents.
