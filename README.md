@@ -497,6 +497,7 @@ MemoryPack will attempt to overwrite as much as possible, but if the following c
 
 * ref value (includes members in object graph) is null, set new instance
 * only allows parameterless constructor, if parameterized constructor is used, create new instance
+* if any member is init-only, create new instance, because it can only be assigned in an object initializer
 * if value is `T[]`, reuse only if the length is the same, otherwise create new instance
 * if value is collection that has `.Clear()` method(`List<>`, `Stack<>`, `Queue<>`, `LinkedList<>`, `HashSet<>`, `PriorityQueue<,>`, `ObservableCollection`, `Collection`, `ConcurrentQueue<>`, `ConcurrentStack<>`, `ConcurrentBag<>`, `Dictionary<,>`, `SortedDictionary<,>`, `SortedList<,>`, `ConcurrentDictionary<,>`) call Clear() and reuse it, otherwise create new instance
 
@@ -720,7 +721,7 @@ public partial class Employee
 }
 ```
 
-`GenerateType.CircularReference` has the same characteristics as version-tolerant. However, as an additional constraint, only parameterless constructors are allowed. Also, object reference tracking is only done for objects marked with `GenerateType.CircularReference`. If you want to track any other object, wrap it.
+`GenerateType.CircularReference` has the same characteristics as version-tolerant. However, as an additional constraint, only parameterless constructors are allowed and members cannot be init-only, because the instance has to be registered as an object reference before its members are read. Also, object reference tracking is only done for objects marked with `GenerateType.CircularReference`. If you want to track any other object, wrap it.
 
 CustomFormatter
 ---

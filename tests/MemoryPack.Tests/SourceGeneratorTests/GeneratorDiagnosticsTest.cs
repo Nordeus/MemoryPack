@@ -704,6 +704,21 @@ public partial struct Tester
                     }
                     """);
     }
+    [Fact]
+    public void MEMPACK043_CircularReferenceNotAllowsInitOnlyMember()
+    {
+        Compile(43, """
+using MemoryPack;
+
+[MemoryPackable(GenerateType.CircularReference)]
+public partial class Tester
+{
+    [MemoryPackOrder(0)]
+    public int I1 { get; init; }
+}
+
+""");
+    }
 }
 
 #endif

@@ -76,6 +76,13 @@ public partial class TypeMeta
         && (IsValueType || Symbol.InstanceConstructors.Any(x => x.Parameters.IsEmpty));
 
     /// <summary>
+    /// Whether at least one member can only be assigned in an object initializer (an init-only
+    /// setter), so deserializing over an existing instance has to construct a new one instead of
+    /// writing the members back — otherwise those members are silently dropped.
+    /// </summary>
+    public bool RequireNewInstanceOnOverwrite => Members.Any(x => x is { IsSettable: true, IsOverwritable: false, IsConstructorParameter: false });
+
+    /// <summary>
     /// `required` members that `new T()` must assign in an object initializer to compile. They get
     /// `default` there — `required` means the caller always supplies the value, so the type has no
     /// meaningful declared default for them.
@@ -304,6 +311,15 @@ public partial class TypeMeta
                 context.ReportDiagnostic(Diagnostic.Create(DiagnosticDescriptors.CircularReferenceOnlyAllowsParameterlessConstructor, syntax.Identifier.GetLocation(), Symbol.Name));
                 return false;
             }
+
+            // the instance is registered as an object reference before its members are read, so a
+            // member that can only be assigned in an object initializer can never be deserialized
+            var initOnlyMembers = Members.Where(x => x is { IsSettable: true, IsOverwritable: false, IsConstructorParameter: false }).ToArray();
+            foreach (var item in initOnlyMembers)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(DiagnosticDescriptors.CircularReferenceNotAllowsInitOnlyMember, item.GetLocation(syntax), Symbol.Name, item.Name));
+            }
+            if (initOnlyMembers.Length != 0) return false;
         }
 
         // GenerateType.Objector VersionTorelant validation
@@ -658,6 +674,9 @@ partial class MemberMeta
     public bool IsProperty { get; }
     public bool IsSettable { get; }
     public bool IsAssignable { get; }
+    /// <summary>Can be written back onto an already constructed instance. `required` only
+    /// constrains construction, but an init-only setter is unusable outside an object initializer.</summary>
+    public bool IsOverwritable { get; }
     public bool IsConstructorParameter { get; }
     public string? ConstructorParameterName { get; }
     public int Order { get; }
@@ -707,6 +726,7 @@ partial class MemberMeta
             IsProperty = false;
             IsField = true;
             IsSettable = !f.IsReadOnly; // readonly field can not set.
+            IsOverwritable = IsSettable;
             IsAssignable = IsSettable
 #if !ROSLYN3
                  && !f.IsRequired
@@ -719,11 +739,12 @@ partial class MemberMeta
             IsProperty = true;
             IsField = false;
             IsSettable = !p.IsReadOnly;
-            IsAssignable = IsSettable
+            IsOverwritable = IsSettable && (p.SetMethod != null && !p.SetMethod.IsInitOnly);
+            IsAssignable = IsOverwritable
 #if !ROSLYN3
                 && !p.IsRequired
 #endif
-                && (p.SetMethod != null && !p.SetMethod.IsInitOnly);
+                ;
             MemberType = p.Type;
         }
         else

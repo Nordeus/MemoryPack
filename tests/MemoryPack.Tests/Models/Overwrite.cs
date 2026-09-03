@@ -44,3 +44,22 @@ public partial class Overwrite4
     public Overwrite? MyProperty2 { get; set; }
     public List<int>? MyProperty3 { get; set; }
 }
+
+// an init-only member cannot be written back onto an existing instance, so overwriting has to
+// construct a new one (same as Overwrite3, which cannot re-run its parameterized constructor)
+[MemoryPackable]
+public partial class Overwrite5
+{
+    public int MyProperty1 { get; set; }
+    public int MyProperty2 { get; init; }
+    public string? MyProperty3 { get; init; }
+}
+
+// `required` only constrains construction, so these can still be written back in place
+[MemoryPackable]
+public partial class Overwrite6
+{
+    public int MyProperty1 { get; set; }
+    public required int MyProperty2 { get; set; }
+    public required string? MyProperty3 { get; set; }
+}

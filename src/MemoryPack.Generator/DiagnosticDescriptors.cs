@@ -340,4 +340,12 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor CircularReferenceNotAllowsInitOnlyMember = new(
+        id: "MEMPACK043",
+        title: "CircularReference MemoryPack Object does not allow init-only member",
+        messageFormat: "The MemoryPackable object '{0}' is GenerateType.CircularReference so member '{1}' cannot be init-only, the instance must be registered as an object reference before its members are read.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

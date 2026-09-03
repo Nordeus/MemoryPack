@@ -132,4 +132,42 @@ public class OverwriteTest
             original.MyProperty3.Should().BeSameAs(write.MyProperty3);
         }
     }
+
+    [Fact]
+    public void InitOnlyMember()
+    {
+        var write = new Overwrite5 { MyProperty1 = 10, MyProperty2 = 20, MyProperty3 = "foo" };
+        var bin = MemoryPackSerializer.Serialize(write);
+
+        var overwriteTarget = new Overwrite5 { MyProperty1 = 99, MyProperty2 = 9999, MyProperty3 = "hoahoahoa" };
+        var original = overwriteTarget;
+        MemoryPackSerializer.Deserialize(bin, ref overwriteTarget);
+
+        Debug.Assert(overwriteTarget != null);
+        overwriteTarget.MyProperty1.Should().Be(10);
+        overwriteTarget.MyProperty2.Should().Be(20);
+        overwriteTarget.MyProperty3.Should().Be("foo");
+
+        // not same reference, an init-only member can only be assigned in an object initializer
+        original.Should().NotBeSameAs(overwriteTarget);
+    }
+
+    [Fact]
+    public void RequiredMember()
+    {
+        var write = new Overwrite6 { MyProperty1 = 10, MyProperty2 = 20, MyProperty3 = "foo" };
+        var bin = MemoryPackSerializer.Serialize(write);
+
+        var overwriteTarget = new Overwrite6 { MyProperty1 = 99, MyProperty2 = 9999, MyProperty3 = "hoahoahoa" };
+        var original = overwriteTarget;
+        MemoryPackSerializer.Deserialize(bin, ref overwriteTarget);
+
+        Debug.Assert(overwriteTarget != null);
+        overwriteTarget.MyProperty1.Should().Be(10);
+        overwriteTarget.MyProperty2.Should().Be(20);
+        overwriteTarget.MyProperty3.Should().Be("foo");
+
+        // same reference, `required` members have real setters
+        original.Should().BeSameAs(overwriteTarget);
+    }
 }

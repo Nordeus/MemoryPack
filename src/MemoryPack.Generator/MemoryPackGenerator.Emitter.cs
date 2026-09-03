@@ -598,6 +598,14 @@ partial {{classOrStructOrRecord}} {{TypeName}}
         // Blank members are padded order slots, they have nothing to restore and never reference it
         var hasRestorableMembers = Members.Any(x => x.Symbol != null);
 
+        // An init-only member cannot be written back onto `value`, and a parameterized constructor
+        // cannot be re-run on it either, so those types fall through to NEW and build a fresh
+        // instance from the locals rather than silently dropping the members they cannot assign.
+        var canOverwriteInPlace = IsUseEmptyConstructor && !RequireNewInstanceOnOverwrite;
+        var setBody = Members.Where(x => x.IsOverwritable)
+            .Select(x => $"        {(canOverwriteInPlace ? "" : "// ")}value.@{x.Name} = __{x.Name};")
+            .NewLine();
+
         var equalCountAccessor = isVersionTolerant ? DefaultValuesAccessor(eager: false) : null;
         var equalCountBody = EmitDeserializeMembers(Members, "                ", equalCountAccessor);
         if (equalCountAccessor != null && hasRestorableMembers)
@@ -677,8 +685,8 @@ partial {{classOrStructOrRecord}} {{TypeName}}
         }
 
     SET:
-        {{(!IsUseEmptyConstructor ? "goto NEW;" : "")}}
-{{Members.Where(x => x.IsAssignable).Select(x => $"        {(IsUseEmptyConstructor ? "" : "// ")}value.@{x.Name} = __{x.Name};").NewLine()}}
+        {{(canOverwriteInPlace ? "" : "goto NEW;")}}
+{{setBody}}
         goto READ_END;
 
     NEW:
