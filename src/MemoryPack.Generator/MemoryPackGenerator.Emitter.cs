@@ -2,6 +2,7 @@
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Text;
 
@@ -117,7 +118,7 @@ using MemoryPack;
             BuildDebugInfo(sb, typeMeta, true);
 
             // also output to log
-            var serializationInfoDirectory = ResolveSerializationInfoDirectory(syntax.SyntaxTree.FilePath);
+            var serializationInfoDirectory = ResolveSerializationInfoDirectory(syntax.SyntaxTree.FilePath, compilation.AssemblyName);
             if (serializationInfoDirectory != null)
             {
                 try
@@ -125,6 +126,11 @@ using MemoryPack;
                     var logSw = new StringBuilder();
                     BuildDebugInfo(logSw, typeMeta, false);
                     var message = logSw.ToString();
+
+                    // Created here, where there is something to put in it, so that an assembly with no
+                    // serialization info never leaves an empty folder behind. The folder may also have been
+                    // deleted between compilations, and creating an existing one is a no-op.
+                    Directory.CreateDirectory(serializationInfoDirectory);
 
                     File.WriteAllText(Path.Combine(serializationInfoDirectory, $"{fullType}.txt"), message, new UTF8Encoding(false));
                 }
@@ -158,10 +164,16 @@ using MemoryPack;
     // change to a serialized layout shows up in the diff of that repository's pull request - types declared
     // in a submodule get their own folder inside it. The '~' suffix keeps Unity's asset pipeline out of the
     // folder: no TextAsset import, no .meta files, and no import triggered by writing during compilation.
+    // Within it, each assembly gets its own subfolder, which is what makes the folder self-cleaning: an
+    // assembly knows every type it currently produces, so it can delete anything else in its own subfolder
+    // (see SweepOrphanedSerializationInfo) without needing to know anything about the other assemblies
+    // writing to the same repository.
+    // Only computes the path - callers create the folder when they actually have a file to write, so that
+    // an assembly without any serialization info does not get an empty folder.
     // Returns null when the file does not live in a git repository, in which case nothing is written.
-    static string? ResolveSerializationInfoDirectory(string sourceFilePath)
+    static string? ResolveSerializationInfoDirectory(string sourceFilePath, string? assemblyName)
     {
-        if (string.IsNullOrEmpty(sourceFilePath))
+        if (string.IsNullOrEmpty(sourceFilePath) || string.IsNullOrEmpty(assemblyName))
         {
             return null;
         }
@@ -212,16 +224,92 @@ using MemoryPack;
 
         try
         {
-            // not cached - the folder may be deleted between compilations, and creating an existing one is a no-op
-            Directory.CreateDirectory(outputDirectory);
+            return Path.Combine(outputDirectory, assemblyName!);
+        }
+        catch (Exception ex)
+        {
+            // an assembly name that cannot be used as a folder name
+            Trace.WriteLine(ex.ToString());
+            return null;
+        }
+    }
+
+    // Same fullType derivation Generate uses to name its .txt file (including resolving the target
+    // symbol for [MemoryPackUnionFormatter]), kept standalone so the sweep can compute the expected file
+    // name for every attributed type without paying for full TypeMeta validation/emission.
+    static string? TryGetExpectedFullTypeName(TypeDeclarationSyntax syntax, Compilation compilation, CancellationToken cancellationToken)
+    {
+        var semanticModel = compilation.GetSemanticModel(syntax.SyntaxTree);
+        var typeSymbol = semanticModel.GetDeclaredSymbol(syntax, cancellationToken);
+        if (typeSymbol == null)
+        {
+            return null;
+        }
+
+        var reference = new ReferenceSymbols(compilation);
+        var unionFormatterAttr = typeSymbol.GetAttribute(reference.MemoryPackUnionFormatterAttribute);
+        if (unionFormatterAttr != null)
+        {
+            var unionSymbol = unionFormatterAttr.ConstructorArguments[0].Value as INamedTypeSymbol;
+            if (unionSymbol == null)
+            {
+                return null;
+            }
+            typeSymbol = unionSymbol;
+        }
+
+        return typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+            .Replace("global::", "")
+            .Replace("<", "_")
+            .Replace(">", "_");
+    }
+
+    // Keeps an assembly's serialization info folder matching the types it currently declares, so a
+    // deleted, renamed or un-attributed type does not leave a stale .txt behind, and an assembly left
+    // without any serialization info at all does not leave a folder behind. Deleting is safe here
+    // without any bookkeeping because the folder belongs to this assembly alone and the compilation
+    // knows every type in it - including on a fresh clone, where files committed by someone else that
+    // no longer have a type get cleaned up by the first build.
+    // Known limitation: the TFMs of a multi-targeted project share one folder, so if conditional
+    // compilation makes them declare different types, each build deletes the other's files. Keying the
+    // folder by TFM is not possible here, since the TFM is only available through an MSBuild property
+    // that hosts driving Roslyn directly (such as Unity) do not provide.
+    static void SweepOrphanedSerializationInfo(string anchorSourceFilePath, string? assemblyName, ImmutableArray<string> expectedFullTypeNames)
+    {
+        var assemblyDirectory = ResolveSerializationInfoDirectory(anchorSourceFilePath, assemblyName);
+        if (assemblyDirectory == null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!Directory.Exists(assemblyDirectory))
+            {
+                return;
+            }
+
+            var expected = new HashSet<string>(expectedFullTypeNames, StringComparer.Ordinal);
+
+            // GetFiles, not EnumerateFiles - the listing is consumed while deleting from it.
+            foreach (var txtFile in Directory.GetFiles(assemblyDirectory, "*.txt", SearchOption.TopDirectoryOnly))
+            {
+                if (!expected.Contains(Path.GetFileNameWithoutExtension(txtFile)))
+                {
+                    File.Delete(txtFile);
+                }
+            }
+
+            // Non-recursive on purpose: this can only ever remove a folder that is already empty.
+            if (!Directory.EnumerateFileSystemEntries(assemblyDirectory).Any())
+            {
+                Directory.Delete(assemblyDirectory);
+            }
         }
         catch (Exception ex)
         {
             Trace.WriteLine(ex.ToString());
-            return null;
         }
-
-        return outputDirectory;
     }
 
     static bool IsPartial(TypeDeclarationSyntax typeDeclaration)

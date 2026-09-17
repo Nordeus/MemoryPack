@@ -2,6 +2,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Collections.Immutable;
 using System.Text;
 
 namespace MemoryPack.Generator;
@@ -112,6 +113,49 @@ public partial class MemoryPackGenerator : IIncrementalGenerator
                 var (langVersion, net7) = source.Right;
 
                 Generate(typeDeclaration, compilation, new GeneratorContext(context, langVersion, net7));
+            });
+        }
+        {
+            // Keeps this assembly's serialization info folder free of orphaned .txt files (deleted or
+            // renamed types, types that lost the attribute, etc. - see SweepOrphanedSerializationInfo).
+            // Fires whenever the set of attributed type declarations for this assembly changes, not on
+            // every edit, because DeclarationsComparer ignores the Compilation and compares only the
+            // collected syntax nodes.
+            // Anchors on a source file from the compilation (any one will do - they all share the same
+            // git root) rather than an MSBuild build_property, because build_property.* is populated by
+            // MSBuild's csc invocation and is not available when a host drives Roslyn directly, e.g.
+            // Unity's in-Editor compiler - the exact same reason Generate resolves its own output
+            // directory from syntax.SyntaxTree.FilePath instead.
+            var allDeclarations = typeDeclarations.Collect()
+                .Combine(typeDeclarations2.Collect())
+                .Select(static (pair, token) => pair.Left.AddRange(pair.Right));
+
+            var source = allDeclarations
+                .Combine(context.CompilationProvider)
+                .WithComparer(DeclarationsComparer.Instance)
+                .WithTrackingName("MemoryPack.MemoryPackable.2_SerializationInfoSweep");
+
+            context.RegisterSourceOutput(source, static (context, source) =>
+            {
+                var (declarations, compilation) = source;
+
+                var anchorFilePath = compilation.SyntaxTrees.FirstOrDefault()?.FilePath;
+                if (string.IsNullOrEmpty(anchorFilePath))
+                {
+                    return;
+                }
+
+                var expectedNames = ImmutableArray.CreateBuilder<string>(declarations.Length);
+                foreach (var declaration in declarations)
+                {
+                    var name = TryGetExpectedFullTypeName(declaration, compilation, context.CancellationToken);
+                    if (name != null)
+                    {
+                        expectedNames.Add(name);
+                    }
+                }
+
+                SweepOrphanedSerializationInfo(anchorFilePath!, compilation.AssemblyName, expectedNames.ToImmutable());
             });
         }
     }
@@ -274,6 +318,21 @@ public partial class MemoryPackGenerator : IIncrementalGenerator
         public int GetHashCode((TypeDeclarationSyntax, Compilation) obj)
         {
             return obj.Item1.GetHashCode();
+        }
+    }
+
+    class DeclarationsComparer : IEqualityComparer<(ImmutableArray<TypeDeclarationSyntax>, Compilation)>
+    {
+        public static readonly DeclarationsComparer Instance = new DeclarationsComparer();
+
+        public bool Equals((ImmutableArray<TypeDeclarationSyntax>, Compilation) x, (ImmutableArray<TypeDeclarationSyntax>, Compilation) y)
+        {
+            return x.Item1.SequenceEqual(y.Item1);
+        }
+
+        public int GetHashCode((ImmutableArray<TypeDeclarationSyntax>, Compilation) obj)
+        {
+            return obj.Item1.Length;
         }
     }
 

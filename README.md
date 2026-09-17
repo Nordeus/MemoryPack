@@ -640,17 +640,7 @@ public partial class VersionTolerantObject3
 
 Serialization info
 ----
-You can check IntelliSense in type what members are serialized. There is an option to write that information to a file at compile time. Set `MemoryPackGenerator_SerializationInfoOutputDirectory` as follows.
-
-```xml
-<!-- output memorypack serialization info to directory -->
-<ItemGroup>
-    <CompilerVisibleProperty Include="MemoryPackGenerator_SerializationInfoOutputDirectory" />
-</ItemGroup>
-<PropertyGroup>
-    <MemoryPackGenerator_SerializationInfoOutputDirectory>$(MSBuildProjectDirectory)\MemoryPackLogs</MemoryPackGenerator_SerializationInfoOutputDirectory>
-</PropertyGroup>
-```
+You can check IntelliSense in type what members are serialized. The generator also writes that information to a file at compile time, automatically: no MSBuild configuration is required. For every `[MemoryPackable]`/`[MemoryPackUnionFormatter]` type, it walks up from the source file to the nearest ancestor containing a `.git` entry and writes the info to `MemoryPackSerializationInfo~/{AssemblyName}/{FullTypeName}.txt` there, so a change to a type's serialized layout shows up in the diff of that repository's pull request. Because each assembly owns its own subfolder, the build also keeps that folder in sync with the types the assembly actually declares: renaming, deleting, or un-attributing a type removes its stale `.txt` file instead of leaving an orphan behind.
 
 The following info is written to the file.
 
