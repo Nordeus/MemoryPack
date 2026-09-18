@@ -681,6 +681,10 @@ partial class MemberMeta
     public string? ConstructorParameterName { get; }
     public int Order { get; }
     public bool HasExplicitOrder { get; }
+    /// <summary>Position among the serialized members as declared in code, before MemoryPackOrder is
+    /// applied. Unmanaged types are serialized as a memcpy of the struct, so this, and not Order, is the
+    /// position a member occupies in their payload.</summary>
+    public int DeclarationIndex { get; }
     public MemberKind Kind { get; }
     public bool SuppressDefaultInitialization { get; }
 
@@ -690,6 +694,7 @@ partial class MemberMeta
         this.Name = null!;
         this.MemberType = null!;
         this.Order = order;
+        this.DeclarationIndex = order;
         this.Kind = MemberKind.Blank;
     }
 
@@ -698,6 +703,7 @@ partial class MemberMeta
         this.Symbol = symbol;
         this.Name = symbol.Name;
         this.Order = sequentialOrder;
+        this.DeclarationIndex = sequentialOrder;
         this.SuppressDefaultInitialization = symbol.ContainsAttribute(references.SkipOverwriteDefaultAttribute);
         var orderAttr = symbol.GetAttribute(references.MemoryPackOrderAttribute);
         if (orderAttr != null)

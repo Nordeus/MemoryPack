@@ -381,28 +381,38 @@ using MemoryPack;
             sb.AppendLine("/// <code>");
         }
 
-        foreach (var item in type.Members)
+        // Members are listed in payload order, each prefixed by the position it occupies there, so that a
+        // change to the serialized layout - including an order skipped by MemoryPackOrder, which is a real
+        // slot holding nothing - is visible in the diff of this file.
+        var payloadMembers = type.GetPayloadOrderedMembers();
+        for (var i = 0; i < payloadMembers.Length; i++)
         {
-            if (xmlDocument)
-            {
-                sb.Append("/// <b>");
-            }
-
-            sb.Append(WithEscape(item.MemberType));
-            if (xmlDocument)
-            {
-                sb.Append("</b>");
-            }
-
-            sb.Append(" ");
-            sb.Append(item.Name);
+            var item = payloadMembers[i];
+            var isBlankSlot = item.Kind == MemberKind.Blank;
 
             if (xmlDocument)
             {
-                sb.AppendLine("<br/>");
+                sb.Append("/// ").Append(i).Append(": ");
+                if (isBlankSlot)
+                {
+                    sb.AppendLine("&lt;Empty&gt;<br/>");
+                }
+                else
+                {
+                    sb.Append("<b>").Append(WithEscape(item.MemberType)).Append("</b> ").Append(item.Name).AppendLine("<br/>");
+                }
             }
             else
             {
+                sb.Append(i).Append(": ");
+                if (isBlankSlot)
+                {
+                    sb.Append("<Empty>");
+                }
+                else
+                {
+                    sb.Append(WithEscape(item.MemberType)).Append(' ').Append(item.Name);
+                }
                 sb.Append('\n');
             }
         }
@@ -416,6 +426,34 @@ using MemoryPack;
 
 public partial class TypeMeta
 {
+    // The members in the order they occupy the payload, which the emitted formatter and the serialization
+    // info written out for review have to agree on:
+    // - an unmanaged type is a memcpy of the struct, so its payload follows the physical field order and
+    //   MemoryPackOrder plays no part in it
+    // - VersionTolerant and CircularReference address members by slot, so an order skipped by
+    //   MemoryPackOrder is still a slot in the payload, represented here by a blank member
+    // - anything else is written back to back in Order, which is validated to be continuous from zero
+    public MemberMeta[] GetPayloadOrderedMembers()
+    {
+        if (IsUnmanagedType)
+        {
+            return Members.OrderBy(x => x.DeclarationIndex).ToArray();
+        }
+
+        if ((GenerateType is GenerateType.VersionTolerant or GenerateType.CircularReference) && Members.Length != 0)
+        {
+            var maxOrder = Members.Max(x => x.Order);
+            var padded = new MemberMeta[maxOrder + 1];
+            for (var i = 0; i <= maxOrder; i++)
+            {
+                padded[i] = Members.FirstOrDefault(x => x.Order == i) ?? MemberMeta.CreateEmpty(i);
+            }
+            return padded;
+        }
+
+        return Members;
+    }
+
     public void Emit(StringBuilder writer, IGeneratorContext context)
     {
         if (IsUnion)
@@ -444,20 +482,9 @@ public partial class TypeMeta
         else
         {
             var originalMembers = Members;
-            if (GenerateType is GenerateType.VersionTolerant or GenerateType.CircularReference)
-            {
-                // for emit time, replace padded empty
-                if (Members.Length != 0)
-                {
-                    var maxOrder = Members.Max(x => x.Order);
-                    var tempMembers = new MemberMeta[maxOrder + 1];
-                    for (int i = 0; i <= maxOrder; i++)
-                    {
-                        tempMembers[i] = Members.FirstOrDefault(x => x.Order == i) ?? MemberMeta.CreateEmpty(i);
-                    }
-                    Members = tempMembers;
-                }
-            }
+
+            // for emit time, replace padded empty
+            Members = GetPayloadOrderedMembers();
 
             serializeBody = EmitSerializeBody(context.IsForUnity);
             deserializeBody = EmitDeserializeBody();
