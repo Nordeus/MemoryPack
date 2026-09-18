@@ -148,11 +148,7 @@ public partial class MemoryPackGenerator : IIncrementalGenerator
                 var expectedNames = ImmutableArray.CreateBuilder<string>(declarations.Length);
                 foreach (var declaration in declarations)
                 {
-                    var name = TryGetExpectedFullTypeName(declaration, compilation, context.CancellationToken);
-                    if (name != null)
-                    {
-                        expectedNames.Add(name);
-                    }
+                    CollectExpectedFileNames(declaration, compilation, expectedNames, context.CancellationToken);
                 }
 
                 SweepOrphanedSerializationInfo(anchorFilePath!, compilation.AssemblyName, expectedNames.ToImmutable());

@@ -68,10 +68,7 @@ partial class MemoryPackGenerator
             return;
         }
 
-        var fullType = typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
-            .Replace("global::", "")
-            .Replace("<", "_")
-            .Replace(">", "_");
+        var fullType = ToSerializationInfoName(typeSymbol);
 
         var sb = new StringBuilder();
 
@@ -133,6 +130,16 @@ using MemoryPack;
                     Directory.CreateDirectory(serializationInfoDirectory);
 
                     File.WriteAllText(Path.Combine(serializationInfoDirectory, $"{fullType}.txt"), message, new UTF8Encoding(false));
+
+                    // An enum's underlying type and values are part of this type's payload, so they are
+                    // written alongside it, into the folder of the assembly doing the serializing rather
+                    // than the one declaring the enum - an assembly only ever deletes from its own folder,
+                    // and only the assemblies that serialize an enum can know that they still do.
+                    foreach (var enumSymbol in GetSerializedEnums(typeMeta))
+                    {
+                        var enumFile = Path.Combine(serializationInfoDirectory, $"{ToSerializationInfoName(enumSymbol)}.txt");
+                        File.WriteAllText(enumFile, BuildEnumDebugInfo(enumSymbol), new UTF8Encoding(false));
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -234,34 +241,84 @@ using MemoryPack;
         }
     }
 
-    // Same fullType derivation Generate uses to name its .txt file (including resolving the target
-    // symbol for [MemoryPackUnionFormatter]), kept standalone so the sweep can compute the expected file
-    // name for every attributed type without paying for full TypeMeta validation/emission.
-    static string? TryGetExpectedFullTypeName(TypeDeclarationSyntax syntax, Compilation compilation, CancellationToken cancellationToken)
+    // The name Generate uses for a symbol's .txt file, and for the hint name of its generated source.
+    static string ToSerializationInfoName(ISymbol symbol)
     {
-        var semanticModel = compilation.GetSemanticModel(syntax.SyntaxTree);
-        var typeSymbol = semanticModel.GetDeclaredSymbol(syntax, cancellationToken);
-        if (typeSymbol == null)
-        {
-            return null;
-        }
-
-        var reference = new ReferenceSymbols(compilation);
-        var unionFormatterAttr = typeSymbol.GetAttribute(reference.MemoryPackUnionFormatterAttribute);
-        if (unionFormatterAttr != null)
-        {
-            var unionSymbol = unionFormatterAttr.ConstructorArguments[0].Value as INamedTypeSymbol;
-            if (unionSymbol == null)
-            {
-                return null;
-            }
-            typeSymbol = unionSymbol;
-        }
-
-        return typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+        return symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
             .Replace("global::", "")
             .Replace("<", "_")
             .Replace(">", "_");
+    }
+
+    // The enums this type serializes, found by walking its members the same way the TypeScript generator
+    // does - through arrays, nullables and generic arguments. Members of another MemoryPackable type are
+    // not followed: that type has its own formatter, so its enums belong to whichever assembly declares it.
+    static IEnumerable<INamedTypeSymbol> GetSerializedEnums(TypeMeta typeMeta)
+    {
+        var collector = new TypeCollector();
+        collector.Visit(typeMeta, visitInterface: false);
+        return collector.GetEnums().OfType<INamedTypeSymbol>();
+    }
+
+    // Every file this declaration is expected to contribute to its assembly's folder: its own
+    // serialization info plus one file per enum it serializes. The sweep deletes whatever is not listed
+    // here, so this has to stay in step with what Generate writes. Listing a name whose file is never
+    // written is harmless - it only protects a file that does not exist - but missing one deletes a live
+    // file, so this deliberately errs towards listing too much.
+    static void CollectExpectedFileNames(TypeDeclarationSyntax syntax, Compilation compilation, ICollection<string> expected, CancellationToken cancellationToken)
+    {
+        var semanticModel = compilation.GetSemanticModel(syntax.SyntaxTree);
+        if (semanticModel.GetDeclaredSymbol(syntax, cancellationToken) is not INamedTypeSymbol typeSymbol)
+        {
+            return;
+        }
+
+        expected.Add(ToSerializationInfoName(typeSymbol));
+
+        var reference = new ReferenceSymbols(compilation);
+        var typeMeta = new TypeMeta(typeSymbol, reference);
+
+        // a [MemoryPackUnionFormatter] class serializes the members of its target type, not its own
+        var unionFormatterAttr = typeSymbol.GetAttribute(reference.MemoryPackUnionFormatterAttribute);
+        if (unionFormatterAttr != null)
+        {
+            if (unionFormatterAttr.ConstructorArguments[0].Value is not INamedTypeSymbol unionSymbol)
+            {
+                return;
+            }
+            typeMeta.Symbol = unionSymbol;
+        }
+
+        foreach (var enumSymbol in GetSerializedEnums(typeMeta))
+        {
+            expected.Add(ToSerializationInfoName(enumSymbol));
+        }
+    }
+
+    static string BuildEnumDebugInfo(INamedTypeSymbol enumSymbol)
+    {
+        var sb = new StringBuilder();
+
+        // Always use '\n' (not AppendLine/Environment.NewLine) so these committed
+        // .txt files have stable line endings regardless of the build OS.
+        sb.Append("enum ").Append(enumSymbol.EnumUnderlyingType?.ToDisplayString() ?? "int")
+            .Append(' ').Append(ToSerializationInfoName(enumSymbol)).Append('\n');
+        sb.Append("---").Append('\n');
+
+        // Ordered by value, not by declaration, so that moving an entry without changing its value - which
+        // the payload cannot tell apart - does not show up as a change here. Decimal compares every
+        // underlying type without overflowing, including ulong.
+        var entries = enumSymbol.GetMembers()
+            .OfType<IFieldSymbol>()
+            .Where(x => x.HasConstantValue)
+            .OrderBy(x => Convert.ToDecimal(x.ConstantValue));
+
+        foreach (var entry in entries)
+        {
+            sb.Append(entry.ConstantValue).Append(": ").Append(entry.Name).Append('\n');
+        }
+
+        return sb.ToString();
     }
 
     // Keeps an assembly's serialization info folder matching the types it currently declares, so a
