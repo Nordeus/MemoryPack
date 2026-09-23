@@ -669,6 +669,10 @@ partial class MemberMeta
     public string Name { get; }
     public ITypeSymbol MemberType { get; }
     public INamedTypeSymbol? CustomFormatter { get; }
+    /// <summary>The attribute as it is applied to the member, kept for the arguments it is constructed
+    /// with - a quantizing formatter's bit count and range are part of the payload, so the serialization
+    /// info has to show them.</summary>
+    public AttributeData? CustomFormatterAttribute { get; }
     public string? CustomFormatterName { get; }
     public bool IsField { get; }
     public bool IsProperty { get; }
@@ -771,6 +775,7 @@ partial class MemberMeta
             if (customFormatterAttr != null)
             {
                 CustomFormatter = customFormatterAttr.AttributeClass!;
+                CustomFormatterAttribute = customFormatterAttr;
                 Kind = MemberKind.CustomFormatter;
 
                 string formatterName;

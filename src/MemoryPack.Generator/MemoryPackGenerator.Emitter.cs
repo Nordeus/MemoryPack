@@ -118,33 +118,32 @@ using MemoryPack;
             var serializationInfoDirectory = ResolveSerializationInfoDirectory(syntax.SyntaxTree.FilePath, compilation.AssemblyName);
             if (serializationInfoDirectory != null)
             {
-                try
+                var logSw = new StringBuilder();
+                BuildDebugInfo(logSw, typeMeta, false);
+
+                WriteSerializationInfo(serializationInfoDirectory, fullType, logSw.ToString());
+
+                // An enum's underlying type and values are part of this type's payload, so they are
+                // written alongside it, into the folder of the assembly doing the serializing rather
+                // than the one declaring the enum - an assembly only ever deletes from its own folder,
+                // and only the assemblies that serialize an enum can know that they still do.
+                foreach (var enumSymbol in GetSerializedEnums(typeMeta))
                 {
-                    var logSw = new StringBuilder();
-                    BuildDebugInfo(logSw, typeMeta, false);
-                    var message = logSw.ToString();
-
-                    // Created here, where there is something to put in it, so that an assembly with no
-                    // serialization info never leaves an empty folder behind. The folder may also have been
-                    // deleted between compilations, and creating an existing one is a no-op.
-                    Directory.CreateDirectory(serializationInfoDirectory);
-
-                    File.WriteAllText(Path.Combine(serializationInfoDirectory, $"{fullType}.txt"), message, new UTF8Encoding(false));
-
-                    // An enum's underlying type and values are part of this type's payload, so they are
-                    // written alongside it, into the folder of the assembly doing the serializing rather
-                    // than the one declaring the enum - an assembly only ever deletes from its own folder,
-                    // and only the assemblies that serialize an enum can know that they still do.
-                    foreach (var enumSymbol in GetSerializedEnums(typeMeta))
-                    {
-                        var enumFile = Path.Combine(serializationInfoDirectory, $"{ToSerializationInfoName(enumSymbol)}.txt");
-                        File.WriteAllText(enumFile, BuildEnumDebugInfo(enumSymbol), new UTF8Encoding(false));
-                    }
+                    WriteSerializationInfo(serializationInfoDirectory, ToSerializationInfoName(enumSymbol), BuildEnumDebugInfo(enumSymbol));
                 }
-                catch (Exception ex)
-                {
-                    Trace.WriteLine(ex.ToString());
-                }
+            }
+        }
+        else if (typeMeta.IsUnion)
+        {
+            // A union base declares no payload of its own - what it contributes is the tag written in
+            // front of the concrete type that follows, so its tag table is its serialization info.
+            // Renumbering a tag, reusing a retired one or pointing one at a different class all break
+            // every peer still running the old build, and none of it is visible in the member lists of
+            // the types involved.
+            var serializationInfoDirectory = ResolveSerializationInfoDirectory(syntax.SyntaxTree.FilePath, compilation.AssemblyName);
+            if (serializationInfoDirectory != null)
+            {
+                WriteSerializationInfo(serializationInfoDirectory, fullType, BuildUnionDebugInfo(typeMeta));
             }
         }
 
@@ -250,6 +249,25 @@ using MemoryPack;
             .Replace(">", "_");
     }
 
+    // Writing serialization info is best effort - a compilation must not fail over a working copy that
+    // happens to be read-only, or over another compilation holding the same file open.
+    static void WriteSerializationInfo(string directory, string fileName, string content)
+    {
+        try
+        {
+            // Created here, where there is something to put in it, so that an assembly with no
+            // serialization info never leaves an empty folder behind. The folder may also have been
+            // deleted between compilations, and creating an existing one is a no-op.
+            Directory.CreateDirectory(directory);
+
+            File.WriteAllText(Path.Combine(directory, $"{fileName}.txt"), content, new UTF8Encoding(false));
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine(ex.ToString());
+        }
+    }
+
     // The enums this type serializes, found by walking its members the same way the TypeScript generator
     // does - through arrays, nullables and generic arguments. Members of another MemoryPackable type are
     // not followed: that type has its own formatter, so its enums belong to whichever assembly declares it.
@@ -316,6 +334,29 @@ using MemoryPack;
         foreach (var entry in entries)
         {
             sb.Append(entry.ConstantValue).Append(": ").Append(entry.Name).Append('\n');
+        }
+
+        return sb.ToString();
+    }
+
+    static string BuildUnionDebugInfo(TypeMeta type)
+    {
+        var sb = new StringBuilder();
+
+        // Always use '\n' (not AppendLine/Environment.NewLine) so these committed
+        // .txt files have stable line endings regardless of the build OS.
+        // No tag type in the header, unlike an enum's underlying type: MemoryPackUnion always takes a
+        // ushort, so it would be a constant that can never differ between two of these files.
+        sb.Append("union ").Append(ToSerializationInfoDisplayName(type.Symbol)).Append('\n');
+        sb.Append("---").Append('\n');
+
+        // Ordered by tag, not by declaration, so that moving an attribute without changing its tag - which
+        // the payload cannot tell apart - does not show up as a change here. A retired tag is left as a
+        // gap rather than filled in like a skipped MemoryPackOrder: an order nothing is declared at is
+        // still a slot in the payload, a tag nothing is registered under is not.
+        foreach (var (tag, unionType) in type.UnionTags.OrderBy(x => x.Tag))
+        {
+            sb.Append(tag).Append(": ").Append(ToSerializationInfoDisplayName(unionType)).Append('\n');
         }
 
         return sb.ToString();
@@ -394,11 +435,60 @@ using MemoryPack;
         return typeDeclaration.Parent is TypeDeclarationSyntax;
     }
 
+    // The name a symbol goes by inside these files which, unlike the file name, keeps the generic
+    // arguments of a constructed type.
+    static string ToSerializationInfoDisplayName(ISymbol symbol)
+    {
+        return symbol.FullyQualifiedToString().Replace("global::", "");
+    }
+
+    // The attribute a member is serialized through, with the arguments it is constructed with. Those
+    // arguments are part of the payload - a quantizing formatter's bit count and range decide how many
+    // bits the value takes and what it rounds to - while nothing about them is visible in the member's
+    // declared type. Returns null for a member serialized by its type's own formatter.
+    static string? BuildCustomFormatterInfo(MemberMeta member)
+    {
+        var attribute = member.CustomFormatterAttribute;
+        if (attribute?.AttributeClass == null)
+        {
+            return null;
+        }
+
+        // Written the way it is written in source: without the Attribute suffix, but with the type
+        // arguments of a generic formatter attribute, which pick the formatter as much as the
+        // constructor arguments do.
+        var name = attribute.AttributeClass.Name;
+        const string AttributeSuffix = "Attribute";
+        if (name.EndsWith(AttributeSuffix, StringComparison.Ordinal) && name.Length > AttributeSuffix.Length)
+        {
+            name = name.Substring(0, name.Length - AttributeSuffix.Length);
+        }
+
+        if (attribute.AttributeClass.TypeArguments.Length != 0)
+        {
+            name += $"<{string.Join(", ", attribute.AttributeClass.TypeArguments.Select(ToSerializationInfoDisplayName))}>";
+        }
+
+        // ToCSharpString rather than ToString: it is culture invariant and round-trips floating point,
+        // so the same source produces the same text on every machine instead of churning the committed
+        // file. Named arguments are sorted because the order they are written in does not reach the
+        // attribute instance, so it must not reach this file either.
+        var arguments = attribute.ConstructorArguments
+            .Select(x => x.ToCSharpString())
+            .Concat(attribute.NamedArguments
+                .OrderBy(x => x.Key, StringComparer.Ordinal)
+                .Select(x => $"{x.Key} = {x.Value.ToCSharpString()}"))
+            .ToArray();
+
+        return arguments.Length == 0
+            ? $"[{name}]"
+            : $"[{name}({string.Join(", ", arguments)})]";
+    }
+
     static void BuildDebugInfo(StringBuilder sb, TypeMeta type, bool xmlDocument)
     {
-        string WithEscape(ISymbol symbol)
+        string Escape(string str)
         {
-            var str = symbol.FullyQualifiedToString().Replace("global::", "");
             if (xmlDocument)
             {
                 return str.Replace("<", "&lt;").Replace(">", "&gt;");
@@ -407,6 +497,11 @@ using MemoryPack;
             {
                 return str;
             }
+        }
+
+        string WithEscape(ISymbol symbol)
+        {
+            return Escape(ToSerializationInfoDisplayName(symbol));
         }
 
         if (!xmlDocument)
@@ -446,6 +541,7 @@ using MemoryPack;
         {
             var item = payloadMembers[i];
             var isBlankSlot = item.Kind == MemberKind.Blank;
+            var customFormatter = isBlankSlot ? null : BuildCustomFormatterInfo(item);
 
             if (xmlDocument)
             {
@@ -456,7 +552,12 @@ using MemoryPack;
                 }
                 else
                 {
-                    sb.Append("<b>").Append(WithEscape(item.MemberType)).Append("</b> ").Append(item.Name).AppendLine("<br/>");
+                    sb.Append("<b>").Append(WithEscape(item.MemberType)).Append("</b> ").Append(item.Name);
+                    if (customFormatter != null)
+                    {
+                        sb.Append(' ').Append(Escape(customFormatter));
+                    }
+                    sb.AppendLine("<br/>");
                 }
             }
             else
@@ -469,6 +570,10 @@ using MemoryPack;
                 else
                 {
                     sb.Append(WithEscape(item.MemberType)).Append(' ').Append(item.Name);
+                    if (customFormatter != null)
+                    {
+                        sb.Append(' ').Append(customFormatter);
+                    }
                 }
                 sb.Append('\n');
             }
